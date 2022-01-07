@@ -1,7 +1,10 @@
-/* Custom Hooks by Outerbeast (WIP)
+/* Custom Hooks by Outerbeast
+Extension of native hooks for Sven Co-op's Angeslcript API
+Usage: import this into your script then build and register your hook functions as you would with regular hooks, making sure to use "g_CustomHooks".
+Refer to the AngelScript wiki on how to use hooks: https://github.com/baso88/SC_AngelScript/wiki/Hooks
 
 TO-DO:
-- build hooks
+- Optimise code to utilise less cpu
 - Add stopmodes
 - function reflection stuff for getting hook function names
 */
@@ -38,7 +41,6 @@ array<MonsterKilledHook@>       FN_MONSTER_KILLED_HOOKS;
 CCustomHooks g_CustomHooks;
 
 const CScheduledFunction@ fnHookThink = g_Scheduler.SetInterval( g_CustomHooks, "HookThink", 0.1f, g_Scheduler.REPEAT_INFINITE_TIMES );
-const bool blEntityCreated = g_Hooks.RegisterHook( Hooks::Game::EntityCreated, EntityCreatedHook( g_CustomHooks.EntityCreated ) );
 const bool blMapChangeHook = g_Hooks.RegisterHook( Hooks::Game::MapChange, MapChangeHook( g_CustomHooks.ResetEntityInfo ) );
 
 final class CCustomHooks
@@ -47,17 +49,20 @@ final class CCustomHooks
 
     protected HookReturnCode hrcPlayerTouchHandled, hrcPlayerSeeHandled, hrcMonsterTakeDamageHandled, hrcMonsterKilledHandled;
 
-    protected dictionary DICT_PLAYER_TOUCHED_ENTIES;
+    protected int iTotalEntities;
     
     protected array<CBaseEntity@>   P_LIVING_ENTITIES( 128 ), P_BRUSH_ENTITIES( 128 ), P_ALL_ENTITIES;
-    protected array<int>            I_PLAYER_SEEN( g_Engine.maxClients + 1 ), I_PLAYER_TOUCHED( g_Engine.maxClients + 1 ), I_MONSTER_DEAD( g_Engine.maxEntities + 1 );
+    protected array<int>            I_PLAYER_SEEN( g_Engine.maxClients + 1 ), I_PLAYER_TOUCHED( g_Engine.maxClients + 1 );
     protected array<float>          FL_MONSTER_LAST_DMG_TAKEN( g_Engine.maxEntities + 1 );
     protected array<bool>           BL_MONSTER_DEAD( g_Engine.maxEntities + 1 );
 
     bool RegisterHook(const uint32 iHookID, ref @fn)
     {
         if( fn is null )
+        {
+            g_Log.PrintF( "CCustomHooks::RegisterHook : function is null!\n" );
             return false;
+        }
 
         bool blRegistered;
 
@@ -157,7 +162,6 @@ final class CCustomHooks
 
             default:
                 g_Log.PrintF( "CCustomHooks::RegisterHook : Invalid hook ID!\n" );
-                break;
         }
 
         return blRegistered;
@@ -165,6 +169,9 @@ final class CCustomHooks
 
     void RemoveHook(const uint32 iHookID, ref @fn)
     {
+        if( fn is null )
+            RemoveHook( iHookID );
+
         switch( iHookID )
         {
             case CustomHooks::Player::PlayerTouch:
@@ -287,9 +294,38 @@ final class CCustomHooks
 
     protected bool HookInitialise()
     {
-        GetEntities();
+        if( blInitialised )
+            return true;
 
-        return true;
+        blInitialised = true;
+
+        return blInitialised;
+    }
+
+    protected void HookThink()
+    {
+        if( !blInitialised )
+        {
+            blInitialised = HookInitialise();
+            return;
+        }
+        // WIP: Only try to refresh entity handles when the total number of entities change, so to save cycles
+        //iTotalEntities = g_EngineFuncs.NumberOfEntities();
+
+        //if( iTotalEntities != g_EngineFuncs.NumberOfEntities() )
+            GetEntities();
+
+        if( FN_PLAYER_SEE_HOOKS.length() > 0 )
+            HookEvent_PlayerSee();
+
+        if( FN_PLAYER_TOUCH_HOOKS.length() > 0 && P_ALL_ENTITIES.length() > 0 )
+            HookEvent_PlayerTouch();
+
+        if( FN_MONSTER_TAKEDAMAGE_HOOKS.length() > 0 && P_LIVING_ENTITIES.length() > 0 )
+            HookEvent_MonsterTakeDamage();
+
+        if( FN_MONSTER_KILLED_HOOKS.length() > 0  && P_LIVING_ENTITIES.length() > 0  )
+            HookEvent_MonsterKilled();
     }
 
     protected void GetEntities()
@@ -302,7 +338,7 @@ final class CCustomHooks
             
         while( P_BRUSH_ENTITIES.find( null ) >= 0 )
             P_BRUSH_ENTITIES.removeAt( P_BRUSH_ENTITIES.find( null ) );
-
+        // Theres no way to adjoin two arrays together in AngelScript.
         for( uint i = 0; i < P_LIVING_ENTITIES.length(); i++ )
         {
             if( P_LIVING_ENTITIES[i] is null )
@@ -318,27 +354,6 @@ final class CCustomHooks
 
             P_ALL_ENTITIES.insertLast( P_BRUSH_ENTITIES[i] );
         }
-    }
-
-    protected void HookThink()
-    {
-        if( !blInitialised )
-        {
-            blInitialised = HookInitialise();
-            return;
-        }
-
-        if( FN_PLAYER_SEE_HOOKS.length() > 0 )
-            HookEvent_PlayerSee();
-
-        if( FN_PLAYER_TOUCH_HOOKS.length() > 0 /* && P_ALL_ENTITIES.length() > 0 */ )
-            HookEvent_PlayerTouch();
-
-        if( FN_MONSTER_TAKEDAMAGE_HOOKS.length() > 0 /* && iNumLivingEntities > 0  */)
-            HookEvent_MonsterTakeDamage();
-
-        if( FN_MONSTER_KILLED_HOOKS.length() > 0 /* && iNumLivingEntities > 0  */)
-            HookEvent_MonsterKilled();
     }
 
     protected void HookEvent_PlayerSee()
@@ -370,7 +385,7 @@ final class CCustomHooks
 
                     uint uiConstantSeeOut;
 
-                    FN_PLAYER_SEE_HOOKS[j]( pPlayer, pOther, uiConstantSeeOut );
+                    hrcPlayerSeeHandled = FN_PLAYER_SEE_HOOKS[j]( pPlayer, pOther, uiConstantSeeOut );
 
                     if( uiConstantSeeOut < 1 )
                         I_PLAYER_SEEN[iPlayer] = pOther.entindex();
@@ -396,7 +411,6 @@ final class CCustomHooks
                 if( !pPlayer.Intersects( g_EntityFuncs.Instance( I_PLAYER_TOUCHED[iPlayer] ) ) )
                     I_PLAYER_TOUCHED[iPlayer] = 0;
             }
-            
 
             for( uint i = 0; i < P_ALL_ENTITIES.length(); i++ )
             {
@@ -408,7 +422,7 @@ final class CCustomHooks
                 if( pEntity.pev.size == g_vecZero )
                     continue;
 
-               if( pPlayer.Intersects( pEntity ) && I_PLAYER_TOUCHED[iPlayer] != pEntity.entindex() )
+                if( pPlayer.Intersects( pEntity ) && I_PLAYER_TOUCHED[iPlayer] != pEntity.entindex() )
                 {
                     for( uint j = 0; j < FN_PLAYER_TOUCH_HOOKS.length(); j++ )
                     {
@@ -417,7 +431,7 @@ final class CCustomHooks
 
                         uint uiTouchSettingOut;
 
-                        FN_PLAYER_TOUCH_HOOKS[j]( pPlayer, pEntity, uiTouchSettingOut );
+                        hrcPlayerTouchHandled = FN_PLAYER_TOUCH_HOOKS[j]( pPlayer, pEntity, uiTouchSettingOut );
 
                         if( uiTouchSettingOut < 1 )
                             I_PLAYER_TOUCHED[iPlayer] = pEntity.entindex();
@@ -429,8 +443,6 @@ final class CCustomHooks
 
     protected void HookEvent_MonsterTakeDamage()
     {
-        //g_EngineFuncs.ServerPrint( "The last entity in P_LIVING_ENTITIES is" + P_LIVING_ENTITIES[ P_LIVING_ENTITIES.length() - 1 ].GetClassname() + "\n" );
-
         for( uint i = 0; i < P_LIVING_ENTITIES.length(); i++ )
         {
             CBaseMonster@ pMonster = cast<CBaseMonster@>( P_LIVING_ENTITIES[i] );
@@ -442,22 +454,27 @@ final class CCustomHooks
             {
                 FL_MONSTER_LAST_DMG_TAKEN[i] = pMonster.pev.dmg_take;
 
-                for( uint j = 0; j < FN_MONSTER_KILLED_HOOKS.length(); j++ )
+                for( uint j = 0; j < FN_MONSTER_TAKEDAMAGE_HOOKS.length(); j++ )
                 {
-                    if( FN_MONSTER_KILLED_HOOKS[j] is null )
+                    if( FN_MONSTER_TAKEDAMAGE_HOOKS[j] is null )
                         continue;
 
-                    FN_MONSTER_TAKEDAMAGE_HOOKS[j]( pMonster, g_EntityFuncs.Instance( pMonster.pev.dmg_inflictor ), pMonster.pev.dmg_take, pMonster.m_bitsDamageType );
+                    float flDamage = pMonster.pev.dmg_take;
+                    int bitsDamageType = pMonster.m_bitsDamageType;
+
+                    hrcMonsterTakeDamageHandled = 
+                        FN_MONSTER_TAKEDAMAGE_HOOKS[j]( pMonster, g_EntityFuncs.Instance( pMonster.pev.dmg_inflictor ), flDamage, bitsDamageType );
+                    //!-LIMITATION-!: Can't use this because "Only object types that support object handles can use &inout. Use &in or &out instead". AngelScript was made by toddlers
+                    //if( pMonster.IsAlive() && flDamage != pMonster.pev.dmg_take ) // Means that the function overridden the damage value passed in
+                        //pMonster.TakeDamage( g_EntityFuncs.Instance( pMonster.pev.dmg_inflictor ), g_EntityFuncs.Instance( pMonster.pev.dmg_inflictor ), flDamage, bitsDamageType );
                 }
             }
         }
     }
     // Hook is being called while the npc is dead, not only when the moment it was killed
-    // Hook is not called again if the npc was revived
+    // !-BUG-!: Hook is not called again if the npc was revived
     protected void HookEvent_MonsterKilled()
     {
-        //g_EngineFuncs.ServerPrint( "The last entity in P_LIVING_ENTITIES is" + P_LIVING_ENTITIES[ P_LIVING_ENTITIES.length() - 1 ].GetClassname() + "\n" );
-
         for( uint i = 0; i < P_LIVING_ENTITIES.length(); i++ )
         {
             CBaseMonster@ pMonster = cast<CBaseMonster@>( P_LIVING_ENTITIES[i] );
@@ -473,7 +490,12 @@ final class CCustomHooks
                 BL_MONSTER_DEAD[pMonster.entindex()] = true;
 
                 for( uint j = 0; j < FN_MONSTER_KILLED_HOOKS.length(); j++ )
-                    FN_MONSTER_KILLED_HOOKS[j]( pMonster, g_EntityFuncs.Instance( pMonster.pev.dmg_inflictor ) );
+                {
+                    if( FN_MONSTER_KILLED_HOOKS[j] is null )
+                        continue;
+
+                    hrcMonsterKilledHandled = FN_MONSTER_KILLED_HOOKS[j]( pMonster, g_EntityFuncs.Instance( pMonster.pev.dmg_inflictor ) );
+                }
             }
         }
 
@@ -487,39 +509,6 @@ final class CCustomHooks
             if( pMonster is null || pMonster.IsAlive() )
                 BL_MONSTER_DEAD[k] = false;
         }
-    }
-    // !-UNDER-CONSTRUCTION-!
-    HookReturnCode EntityCreated(CBaseEntity@ pEntity)
-    {
-/*         if( pEntity is null )
-            return HOOK_CONTINUE; */
-
-        //g_Scheduler.SetTimeout( this, "EntitySpawned", 0.5f, EHandle( pEntity ) );
-
-/*         g_EngineFuncs.ServerPrint( "EntityCreated:" + pEntity.GetClassname() + "spawned\n" );
-
-        //if( pEntity.IsMonster() && P_LIVING_ENTITIES.find( pEntity ) < 0 )
-        if( pEntity.IsAlive() )
-        {
-            P_LIVING_ENTITIES.resize( P_LIVING_ENTITIES.length() + 1 );
-            @P_LIVING_ENTITIES[ P_LIVING_ENTITIES.length() ] = pEntity;
-            //P_ALL_ENTITIES.insertAt( 0, pEntity );
-        
-            g_EngineFuncs.ServerPrint( "Storing " + pEntity.GetClassname() + " in P_LIVING_ENTTIES array\n" );
-        }
-
-        if( pEntity.IsBSPModel() )
-        {
-            P_BRUSH_ENTITIES.insertLast( pEntity );
-            P_ALL_ENTITIES.insertLast( pEntity );
-
-            if( P_BRUSH_ENTITIES.find( pEntity ) < 0 )
-                g_EngineFuncs.ServerPrint( "Storing brush entity" + pEntity.GetClassname() + " in P_BRUSH_ENTTIES array\n" );
-        } */
-
-        g_Scheduler.SetTimeout( this, "GetEntities", 0.5f );
-
-        return HOOK_CONTINUE;
     }
 
     HookReturnCode ResetEntityInfo()
